@@ -1,0 +1,52 @@
+cat > diagnose.js << 'EOF'
+const fs = require('fs');
+const path = require('path');
+
+console.log('🔍 DIAGNOSING MISSING DEPENDENCIES\n');
+
+// Read server.js to find imports
+const serverContent = fs.readFileSync('server.js', 'utf8');
+
+// Find all require statements
+const requireRegex = /require\(['"]([^'"]+)['"]\)/g;
+const imports = [];
+let match;
+
+while ((match = requireRegex.exec(serverContent)) !== null) {
+  imports.push(match[1]);
+}
+
+console.log('Found imports in server.js:');
+console.log('============================');
+
+let missing = [];
+imports.forEach(imp => {
+  // Skip built-in modules
+  const builtInModules = [
+    'fs', 'path', 'http', 'https', 'url', 'util', 'querystring',
+    'os', 'crypto', 'stream', 'buffer', 'events', 'child_process',
+    'cluster', 'dgram', 'dns', 'domain', 'net', 'readline', 'repl',
+    'tls', 'tty', 'vm', 'zlib'
+  ];
+  
+  if (builtInModules.includes(imp)) return;
+  
+  try {
+    require(imp);
+    console.log(`✅ ${imp}`);
+  } catch (error) {
+    if (error.code === 'MODULE_NOT_FOUND') {
+      console.log(`❌ ${imp} - MISSING`);
+      missing.push(imp);
+    }
+  }
+});
+
+console.log('\n============================');
+if (missing.length === 0) {
+  console.log('🎉 All dependencies are installed!');
+} else {
+  console.log(`📦 Missing ${missing.length} dependencies:`);
+  console.log(`\nnpm install ${missing.join(' ')}`);
+}
+EOF
