@@ -4,6 +4,7 @@ const authRoutes = require('./routes/auth');
 const loanRoutes = require('./routes/loan');
 const adminRoutes = require('./routes/admin');
 const kycRoutes = require('./routes/kyc'); // NEW: KYC routes
+const adminKYCRoutes = require('./routes/adminKYC');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
@@ -61,6 +62,11 @@ const kycLimiter = rateLimit({
     return req.user ? req.user.id : req.ip;
   }
 });
+
+// Mount routes
+app.use('/api/admin', adminRoutes);
+app.use('/api/admin', adminKYCRoutes); // Note: Same base path
+app.use('/api/kyc', kycRoutes);
 
 // ========== MIDDLEWARE ==========
 app.use(express.json({ limit: '10mb' })); // Increased for document uploads
