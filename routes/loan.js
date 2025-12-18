@@ -108,4 +108,28 @@ router.post(
  */
 router.get('/my-loans', auth, getLoansByUser);
 
+// KYC check to loan application
+router.post('/apply', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    const loanAmount = req.body.loan_amount;
+    
+    // KYC Check
+    const kycRequirement = await determineKYCRequirement(user, loanAmount);
+    
+    if (kycRequirement.required && user.kyc.status !== 'verified') {
+      return res.status(403).json({
+        error: 'KYC_VERIFICATION_REQUIRED',
+        message: 'Please complete KYC verification before applying for this loan',
+        requiredLevel: kycRequirement.level,
+        redirectTo: '/kyc/verify'
+      });
+    }
+    
+    // ... rest of your loan application logic
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
