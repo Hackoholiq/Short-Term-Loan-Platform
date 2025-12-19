@@ -169,8 +169,6 @@ router.post('/kyc/:id/approve', auth, isAdmin, async (req, res) => {
       'kyc.verified_at': new Date()
     });
     
-    // TODO: Send notification to user
-    
     res.json({
       success: true,
       message: 'KYC approved successfully',
@@ -247,8 +245,6 @@ router.post('/kyc/:id/reject', auth, isAdmin, async (req, res) => {
       'kyc.rejection_reason': reason
     });
     
-    // TODO: Send notification to user
-    
     res.json({
       success: true,
       message: 'KYC rejected',
@@ -267,6 +263,133 @@ router.post('/kyc/:id/reject', auth, isAdmin, async (req, res) => {
   }
 });
 
+// Get KYC documents for review
+router.get('/kyc/:id/documents', auth, isAdmin, async (req, res) => {
+  try {
+    const kyc = await KYC.findById(req.params.id)
+      .select('id_verification.document_images address_verification.proof_document financial_info.income_proof');
+    
+    if (!kyc) {
+      return res.status(404).json({
+        success: false,
+        error: 'KYC application not found'
+      });
+    }
+    
+    const documents = {
+      id_documents: kyc.id_verification?.document_images || [],
+      address_proof: kyc.address_verification?.proof_document || null,
+      income_proof: kyc.financial_info?.income_proof || null
+    };
+    
+    res.json({
+      success: true,
+      documents
+    });
+  } catch (error) {
+    console.error('Error fetching KYC documents:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch KYC documents' 
+    });
+  }
+});
+
+// Request additional documents
+router.post('/kyc/:id/request-documents', auth, isAdmin, async (req, res) => {
+  try {
+    const { document_type, message } = req.body;
+    
+    const kyc = await KYC.findById(req.params.id);
+    if (!kyc) {
+      return res.status(404).json({
+        success: false,
+        error: 'KYC application not found'
+      });
+    }
+    
+    kyc.history.push({
+      action: 'additional_documents_requested',
+      status: kyc.status,
+      performed_by: req.user.id,
+      timestamp: new Date(),
+      notes: `Requested ${document_type}: ${message}`
+    });
+    
+    await kyc.save();
+    
+    // TODO: Send notification to user
+    
+    res.json({
+      success: true,
+      message: 'Document request sent to user'
+    });
+  } catch (error) {
+    console.error('Error requesting additional documents:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to request additional documents' 
+    });
+  }
+});
+
+// Update KYC level
+router.put('/kyc/:id/level', auth, isAdmin, async (req, res) => {
+  try {
+    const { level } = req.body;
+    
+    if (!['none', 'basic', 'enhanced'].includes(level)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid KYC level'
+      });
+    }
+    
+    const kyc = await KYC.findById(req.params.id);
+    if (!kyc) {
+      return res.status(404).json({
+        success: false,
+        error: 'KYC application not found'
+      });
+    }
+    
+    const oldLevel = kyc.level;
+    kyc.level = level;
+    
+    kyc.history.push({
+      action: 'kyc_level_updated',
+      status: kyc.status,
+      performed_by: req.user.id,
+      timestamp: new Date(),
+      notes: `Level changed from ${oldLevel} to ${level}`
+    });
+    
+    await kyc.save();
+    
+    // Update user if KYC is verified
+    if (kyc.status === 'verified') {
+      await User.findByIdAndUpdate(kyc.user, {
+        'kyc.level': level
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'KYC level updated',
+      kyc: {
+        id: kyc._id,
+        level: kyc.level
+      }
+    });
+  } catch (error) {
+    console.error('Error updating KYC level:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to update KYC level' 
+    });
+  }
+});
+
 // Get KYC statistics
 router.get('/kyc/stats', auth, isAdmin, async (req, res) => {
   try {
@@ -274,6 +397,7 @@ router.get('/kyc/stats', auth, isAdmin, async (req, res) => {
     const pending = await KYC.countDocuments({ status: 'pending_review' });
     const verified = await KYC.countDocuments({ status: 'verified' });
     const rejected = await KYC.countDocuments({ status: 'rejected' });
+    const inProgress = await KYC.countDocuments({ status: 'in_progress' });
     
     const basicCount = await KYC.countDocuments({ level: 'basic' });
     const enhancedCount = await KYC.countDocuments({ level: 'enhanced' });
@@ -286,6 +410,32 @@ router.get('/kyc/stats', auth, isAdmin, async (req, res) => {
       submitted_at: { $gte: sevenDaysAgo }
     });
     
+    const recentApprovals = await KYC.countDocuments({
+      verified_at: { $gte: sevenDaysAgo },
+      status: 'verified'
+    });
+    
+    // Calculate approval rate
+    const processedCount = verified + rejected;
+    const approvalRate = processedCount > 0 ? (verified / processedCount) * 100 : 0;
+    
+    // Average processing time (for approved applications)
+    const approvedKYCs = await KYC.find({ 
+      status: 'verified',
+      submitted_at: { $exists: true },
+      verified_at: { $exists: true }
+    });
+    
+    let totalProcessingTime = 0;
+    approvedKYCs.forEach(kyc => {
+      const processingTime = new Date(kyc.verified_at) - new Date(kyc.submitted_at);
+      totalProcessingTime += processingTime;
+    });
+    
+    const avgProcessingTimeHours = approvedKYCs.length > 0 
+      ? (totalProcessingTime / approvedKYCs.length) / (1000 * 60 * 60)
+      : 0;
+    
     res.json({
       success: true,
       stats: {
@@ -293,10 +443,13 @@ router.get('/kyc/stats', auth, isAdmin, async (req, res) => {
         pending,
         verified,
         rejected,
+        in_progress: inProgress,
         basic: basicCount,
         enhanced: enhancedCount,
         recent_submissions: recentSubmissions,
-        approval_rate: total > 0 ? ((verified / total) * 100).toFixed(2) : 0
+        recent_approvals: recentApprovals,
+        approval_rate: approvalRate.toFixed(2),
+        avg_processing_time_hours: avgProcessingTimeHours.toFixed(2)
       }
     });
   } catch (error) {
@@ -304,6 +457,64 @@ router.get('/kyc/stats', auth, isAdmin, async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to fetch KYC statistics' 
+    });
+  }
+});
+
+// Export KYC data
+router.get('/kyc/export', auth, isAdmin, async (req, res) => {
+  try {
+    const { format = 'csv', startDate, endDate } = req.query;
+    
+    const query = {};
+    if (startDate || endDate) {
+      query.submitted_at = {};
+      if (startDate) query.submitted_at.$gte = new Date(startDate);
+      if (endDate) query.submitted_at.$lte = new Date(endDate);
+    }
+    
+    const kycs = await KYC.find(query)
+      .populate('user', 'name email phone')
+      .populate('reviewed_by', 'name email')
+      .sort({ submitted_at: -1 });
+    
+    if (format === 'csv') {
+      // Convert to CSV
+      const csvData = kycs.map(kyc => ({
+        'KYC ID': kyc._id,
+        'User Name': kyc.user?.name || 'N/A',
+        'User Email': kyc.user?.email || 'N/A',
+        'Status': kyc.status,
+        'Level': kyc.level,
+        'Submitted Date': kyc.submitted_at ? new Date(kyc.submitted_at).toISOString() : 'N/A',
+        'Verified Date': kyc.verified_at ? new Date(kyc.verified_at).toISOString() : 'N/A',
+        'Reviewed By': kyc.reviewed_by?.name || 'N/A',
+        'Rejection Reason': kyc.rejection_reason || 'N/A'
+      }));
+      
+      // Convert to CSV string
+      const csvHeaders = Object.keys(csvData[0] || {}).join(',');
+      const csvRows = csvData.map(row => Object.values(row).map(value => 
+        `"${String(value).replace(/"/g, '""')}"`
+      ).join(','));
+      
+      const csvContent = [csvHeaders, ...csvRows].join('\n');
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=kyc_export.csv');
+      res.send(csvContent);
+    } else {
+      // Return JSON
+      res.json({
+        success: true,
+        kycs
+      });
+    }
+  } catch (error) {
+    console.error('Error exporting KYC data:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to export KYC data' 
     });
   }
 });
