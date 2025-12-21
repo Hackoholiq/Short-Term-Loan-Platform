@@ -105,6 +105,7 @@ app.use('/auth', authRoutes);
 app.use('/loan', loanRoutes);
 app.use('/admin', adminRoutes);
 app.use('/kyc', kycRoutes); // NEW: KYC routes
+app.use('/api/kyc', kycRoutes);
 
 // ========== HEALTH CHECK (Enhanced) ==========
 app.get('/health', (req, res) => {
