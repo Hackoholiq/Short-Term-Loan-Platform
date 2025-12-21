@@ -1,5 +1,31 @@
 const User = require('../models/User');
 
+export const uploadKycDocuments = async (req, res) => {
+  try {
+    console.log('FILES:', req.files); // 👈 DEBUG
+    console.log('BODY:', req.body);
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ message: 'No files uploaded' });
+    }
+
+    const documents = req.files.map(file => ({
+      url: file.path,
+      publicId: file.filename,
+      type: file.mimetype,
+    }));
+
+    return res.status(200).json({
+      message: 'KYC upload successful',
+      documents,
+    });
+
+  } catch (err) {
+    console.error('KYC upload error:', err);
+    res.status(500).json({ message: 'Upload failed' });
+  }
+};
+
 // Upload KYC documents
 exports.uploadDocuments = async (req, res) => {
   try {
