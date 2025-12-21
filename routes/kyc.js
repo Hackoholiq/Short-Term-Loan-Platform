@@ -1,15 +1,24 @@
-import express from 'express';
-import upload from '../middleware/upload.js';
-import { uploadKycDocuments } from '../controllers/kycController.js';
-import auth from '../middleware/auth.js';
-
+// routes/kyc.js
+const express = require('express');
 const router = express.Router();
+
+const upload = require('../middleware/upload');
+const { uploadKycDocuments } = require('../controllers/kycController');
+const auth = require('../middleware/auth');
 
 router.post(
   '/documents/upload',
   auth,
-  upload.array('files', 3),
+  upload.fields([
+    { name: 'front', maxCount: 1 },
+    { name: 'back', maxCount: 1 },
+    { name: 'selfie', maxCount: 1 }
+  ]),
   uploadKycDocuments
 );
 
-export default router;
+router.get('/status', auth, async (req, res) => {
+  res.json({ status: 'pending' });
+});
+
+module.exports = router;
