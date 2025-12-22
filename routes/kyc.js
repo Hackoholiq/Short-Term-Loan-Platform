@@ -3,9 +3,10 @@ const express = require('express');
 const router = express.Router();
 
 const upload = require('../middleware/upload');
-const { uploadKycDocuments } = require('../controllers/kycController');
 const auth = require('../middleware/auth');
+const { uploadKycDocuments, getKycStatus } = require('../controllers/kycController');
 
+// POST /kyc/documents/upload
 router.post(
   '/documents/upload',
   auth,
@@ -17,8 +18,7 @@ router.post(
   uploadKycDocuments
 );
 
-router.get('/status', auth, async (req, res) => {
-  res.json({ status: 'pending_review' });
-});
+// GET /kyc/status
+router.get('/status', auth, getKycStatus);
 
 module.exports = router;
