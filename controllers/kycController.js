@@ -20,7 +20,7 @@ const uploadKycDocuments = async (req, res) => {
     const kyc = await KYC.create({
       user: req.user.id,
       documents,
-      status: 'pending'
+      status: 'pending_review'
     });
 
     res.status(201).json({
@@ -30,10 +30,12 @@ const uploadKycDocuments = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('KYC upload error:', error);
-    res.status(500).json({
-      status: 'error',
-      message: 'KYC upload failed'
+    console.error('🔥 KYC UPLOAD ERROR:', error);
+
+  res.status(500).json({
+    status: 'error',
+    message: error.message,
+    stack: error.stack
     });
   }
 };

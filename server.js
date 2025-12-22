@@ -96,6 +96,7 @@ app.use('/api/loan', loanRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminKYCRoutes);
 app.use('/api/kyc', kycRoutes);
+app.use('/api/auth', authRoutes);
 
 /* ================================
    HEALTH CHECK

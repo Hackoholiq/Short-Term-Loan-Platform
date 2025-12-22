@@ -18,7 +18,7 @@ router.post(
 );
 
 router.get('/status', auth, async (req, res) => {
-  res.json({ status: 'pending' });
+  res.json({ status: 'pending_review' });
 });
 
 module.exports = router;
