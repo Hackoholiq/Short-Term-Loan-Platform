@@ -1,34 +1,28 @@
 const express = require('express');
 const router = express.Router();
-const { 
-  getAllLoans, 
-  approveLoan, 
-  getAllUsers, 
-  getUserTransactions,
-  getReports,
-  promoteToAdmin // Import promoteToAdmin here
 
-} = require('../controllers/adminController'); // Import all functions at once
 const auth = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
 
-// Get all loans (admin only)
-router.get('/loans', auth, isAdmin, getAllLoans);
+const {
+  getAllLoans,
+  approveLoan,
+  getAllUsers,
+  getUserTransactions,
+  getReports,
+  promoteToAdmin
+} = require('../controllers/adminController');
 
-// Approve or reject a loan (admin only)
+// ================= LOANS =================
+router.get('/loans', auth, isAdmin, getAllLoans);
 router.put('/loans/:id/approve', auth, isAdmin, approveLoan);
 
-// Get all users (admin only)
+// ================= USERS =================
 router.get('/users', auth, isAdmin, getAllUsers);
-
-// Promote a user to admin (admin only)
 router.put('/users/:userId/promote', auth, isAdmin, promoteToAdmin);
+router.get('/users/:userId/transactions', auth, isAdmin, getUserTransactions);
 
-// Retrieves user transactions (admin only)
-router.get('/users/:userId/transactions', isAdmin, getUserTransactions);
-
-// Retrieves transaction reports (admin only)
-router.get('/reports', isAdmin, getReports);
+// ================= REPORTS =================
+router.get('/reports', auth, isAdmin, getReports);
 
 module.exports = router;
-

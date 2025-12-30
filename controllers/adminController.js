@@ -86,3 +86,30 @@ exports.getReports = async (req, res) => {
     res.status(500).send('Server error');
   }
 };
+
+// Promote a user to admin
+exports.promoteUser = async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ msg: 'User ID is required' });
+    }
+
+    // Prevent admin from promoting themselves accidentally
+    if (req.user._id.toString() === userId) {
+      return res.status(400).json({ msg: 'You cannot modify your own role' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: 'User not found' });
+
+    user.user_type = 'admin';
+    await user.save();
+
+    res.json({ msg: `${user.email} has been promoted to admin successfully!` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: 'Server error' });
+  }
+};
