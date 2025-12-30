@@ -10,19 +10,24 @@ const {
   getAllUsers,
   getUserTransactions,
   getReports,
-  promoteToAdmin
+  promoteToAdmin,
+  promoteUser
 } = require('../controllers/adminController');
 
-// ================= LOANS =================
+// Loans
 router.get('/loans', auth, isAdmin, getAllLoans);
 router.put('/loans/:id/approve', auth, isAdmin, approveLoan);
 
-// ================= USERS =================
+// Users
 router.get('/users', auth, isAdmin, getAllUsers);
 router.put('/users/:userId/promote', auth, isAdmin, promoteToAdmin);
-router.get('/users/:userId/transactions', auth, isAdmin, getUserTransactions);
 
-// ================= REPORTS =================
+// Promote by email or userId (your existing promoteUser handler expects userId in body)
+// If you want promote-by-email, we can adjust controller later.
+router.post('/promote', auth, isAdmin, promoteUser);
+
+// Transactions / Reports
+router.get('/users/:userId/transactions', auth, isAdmin, getUserTransactions);
 router.get('/reports', auth, isAdmin, getReports);
 
 module.exports = router;
