@@ -49,6 +49,17 @@ app.use(morgan('dev'));
 /* ================================
    RATE LIMITERS
 ================================ */
+// Admin limiter (stricter)
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 mins
+  max: 60,                 // 60 requests/15 mins per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: 'error',
+    message: 'Too many admin requests. Please try again later.'
+  }
+});
 
 // General API limiter
 const apiLimiter = rateLimit({
@@ -93,6 +104,7 @@ app.use('/api/kyc/submit', kycLimiter);
 ================================ */
 app.use('/api/auth', authRoutes);
 app.use('/api/loan', loanRoutes);
+app.use('/api/admin', adminLimiter);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminKYCRoutes);
 app.use('/api/kyc', kycRoutes);

@@ -1,22 +1,50 @@
+const mongoose = require('mongoose');
 const Loan = require('../models/Loan');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 
 /* =====================================================
+   HELPERS
+===================================================== */
+
+const getRequesterId = (req) => {
+  // Works with either:
+  // req.user = { id, user_type }
+  // or req.user = { _id, user_type }
+  // or req.user = { user: { id } }
+  return (
+    req.user?.id ||
+    req.user?._id ||
+    req.user?.user?.id ||
+    req.user?.user?._id ||
+    null
+  );
+};
+
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+/* =====================================================
    ADMIN: LOANS
 ===================================================== */
 
-// GET /api/admin/loans
+// GET /api/admin/loans?status=pending|approved|rejected
 exports.getAllLoans = async (req, res) => {
   try {
-    const loans = await Loan.find()
+    const { status } = req.query;
+
+    const filter = {};
+    if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+      filter.status = status;
+    }
+
+    const loans = await Loan.find(filter)
       .populate('user_id', 'email first_name last_name')
       .sort({ createdAt: -1 });
 
-    res.status(200).json(loans);
+    return res.status(200).json(loans);
   } catch (err) {
     console.error('Get all loans error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };
 
@@ -29,16 +57,30 @@ exports.approveLoan = async (req, res) => {
       return res.status(400).json({ msg: 'Invalid loan status' });
     }
 
-    const loan = await Loan.findById(req.params.id);
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ msg: 'Invalid loan id' });
+    }
+
+    const loan = await Loan.findById(id);
     if (!loan) return res.status(404).json({ msg: 'Loan not found' });
+
+    // Optional: only allow update if pending
+    // (comment out if your app uses other statuses)
+    if (loan.status && loan.status !== 'pending') {
+      return res.status(400).json({ msg: `Loan is already ${loan.status}` });
+    }
 
     loan.status = status;
     await loan.save();
 
-    res.status(200).json({ msg: `Loan ${status} successfully`, loan });
+    return res.status(200).json({
+      msg: `Loan ${status} successfully`,
+      loan,
+    });
   } catch (err) {
     console.error('Approve loan error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };
 
@@ -50,22 +92,46 @@ exports.approveLoan = async (req, res) => {
 exports.getAllUsers = async (req, res) => {
   try {
     const users = await User.find()
-      .select('-password -__v')
-      .sort({ createdAt: -1 });
+      // Keep only fields useful for the admin list view:
+      .select([
+        'first_name',
+        'last_name',
+        'email',
+        'phone',
+        'user_type',
+        'account_status',
+        'created_at',
+        'updated_at',
+        'risk_level',
+        'risk_score',
+        'kyc.status',
+        'kyc.level',
+        'kyc.verification_attempts',
+        'kyc.verified_at',
+        'next_kyc_review_due',
+      ].join(' '))
+      .sort({ created_at: -1 })
+      .lean(); // lean = faster + plain objects
 
-    res.status(200).json(users);
+    return res.status(200).json(users);
   } catch (err) {
     console.error('Get all users error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };
 
 // PUT /api/admin/users/:userId/promote
 exports.promoteToAdmin = async (req, res) => {
   try {
+    const requesterId = getRequesterId(req);
     const { userId } = req.params;
 
-    if (req.user?._id?.toString() === userId) {
+    if (!isValidObjectId(userId)) {
+      return res.status(400).json({ msg: 'Invalid user id' });
+    }
+
+    // Prevent admin from promoting themselves
+    if (requesterId && requesterId.toString() === userId.toString()) {
       return res.status(400).json({ msg: 'You cannot modify your own role' });
     }
 
@@ -79,13 +145,13 @@ exports.promoteToAdmin = async (req, res) => {
     user.user_type = 'admin';
     await user.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       msg: 'User promoted to admin successfully',
       user: { id: user._id, email: user.email, user_type: user.user_type },
     });
   } catch (err) {
     console.error('Promote user error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };
 
@@ -97,20 +163,29 @@ exports.promoteToAdmin = async (req, res) => {
  */
 exports.promoteUser = async (req, res) => {
   try {
+    const requesterId = getRequesterId(req);
     const { email, userId } = req.body || {};
 
     if (!email && !userId) {
       return res.status(400).json({ msg: 'Provide email or userId' });
     }
 
-    const user = email
-      ? await User.findOne({ email: email.toLowerCase().trim() })
-      : await User.findById(userId);
+    let user = null;
+
+    if (email) {
+      const normalizedEmail = String(email).toLowerCase().trim();
+      user = await User.findOne({ email: normalizedEmail });
+    } else {
+      if (!isValidObjectId(userId)) {
+        return res.status(400).json({ msg: 'Invalid user id' });
+      }
+      user = await User.findById(userId);
+    }
 
     if (!user) return res.status(404).json({ msg: 'User not found' });
 
     // Prevent admin from promoting themselves
-    if (req.user?._id?.toString() === user._id.toString()) {
+    if (requesterId && requesterId.toString() === user._id.toString()) {
       return res.status(400).json({ msg: 'You cannot modify your own role' });
     }
 
@@ -121,26 +196,33 @@ exports.promoteUser = async (req, res) => {
     user.user_type = 'admin';
     await user.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       msg: `${user.email} has been promoted to admin successfully!`,
       user: { id: user._id, email: user.email, user_type: user.user_type },
     });
   } catch (err) {
     console.error('promoteUser error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };
 
 // GET /api/admin/users/:userId/transactions
 exports.getUserTransactions = async (req, res) => {
   try {
-    const transactions = await Transaction.find({ user_id: req.params.userId })
-      .sort({ createdAt: -1 });
+    const { userId } = req.params;
 
-    res.status(200).json(transactions);
+    if (!isValidObjectId(userId)) {
+      return res.status(400).json({ msg: 'Invalid user id' });
+    }
+
+    const transactions = await Transaction.find({ user_id: userId }).sort({
+      createdAt: -1,
+    });
+
+    return res.status(200).json(transactions);
   } catch (err) {
     console.error('Get user transactions error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };
 
@@ -160,9 +242,9 @@ exports.getReports = async (req, res) => {
 
     const totalRepayments = totalRepaymentsAgg[0]?.total || 0;
 
-    res.status(200).json({ totalLoans, totalRepayments });
+    return res.status(200).json({ totalLoans, totalRepayments });
   } catch (err) {
     console.error('Get reports error:', err);
-    res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ msg: 'Server error' });
   }
 };

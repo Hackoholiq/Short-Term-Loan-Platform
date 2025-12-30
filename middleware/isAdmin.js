@@ -1,25 +1,25 @@
+// backend/middleware/isAdmin.js
 const User = require('../models/User');
 
 module.exports = async (req, res, next) => {
   try {
-    // req.user comes from auth middleware (decoded token)
-    const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ msg: 'Not authorized' });
+    if (!req.user?.id) {
+      return res.status(401).json({ msg: 'Unauthorized' });
     }
 
-    const user = await User.findById(userId).select('user_type');
-    if (!user) {
-      return res.status(401).json({ msg: 'User not found' });
-    }
+    const user = await User.findById(req.user.id).select('user_type');
+    if (!user) return res.status(401).json({ msg: 'Unauthorized' });
 
     if (user.user_type !== 'admin') {
       return res.status(403).json({ msg: 'Access denied. Admin only.' });
     }
 
+    // Optional: attach fresh role to request
+    req.user.user_type = user.user_type;
+
     next();
   } catch (err) {
-    console.error('isAdmin middleware error:', err);
+    console.error('isAdmin error:', err);
     return res.status(500).json({ msg: 'Server error' });
   }
 };
