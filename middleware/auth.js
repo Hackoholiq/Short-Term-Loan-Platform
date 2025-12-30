@@ -9,15 +9,16 @@ module.exports = function (req, res, next) {
   }
 
   // Remove "Bearer " prefix if present
-  if (token.startsWith('Bearer ')) {
+  if (typeof token === 'string' && token.startsWith('Bearer ')) {
     token = token.slice(7);
   }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // ✅ FIX: attach ONLY the user payload
-    req.user = decoded.user;
+    // ✅ FIX: attach the decoded payload directly
+    // (your token payload is { id, user_type, iat, exp }, not { user: {...} })
+    req.user = decoded;
 
     next();
   } catch (err) {
