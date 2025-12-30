@@ -206,11 +206,14 @@ const UserSchema = new mongoose.Schema({
     virtuals: true,
     transform: function(doc, ret) {
       // Remove sensitive fields when converting to JSON
-      delete ret.password_hash;
+    delete ret.password_hash;
+    if (ret.kyc) {
       delete ret.kyc.api_verification_data;
-      return ret;
     }
-  },
+
+    return ret;
+  }
+},
   toObject: { virtuals: true }
 });
 
