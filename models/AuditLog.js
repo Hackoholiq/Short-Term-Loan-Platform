@@ -2,10 +2,17 @@ const mongoose = require('mongoose');
 
 const AuditLogSchema = new mongoose.Schema(
   {
+    // For pre-auth events (rate limit, failed login), this can be null
     actor_user_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+      required: false,
+      index: true,
+    },
+
+    actor_is_authenticated: {
+      type: Boolean,
+      default: false,
       index: true,
     },
 
@@ -17,10 +24,10 @@ const AuditLogSchema = new mongoose.Schema(
       required: true,
       trim: true,
       index: true,
-      // examples: "ADMIN_PROMOTE_USER", "ADMIN_APPROVE_LOAN"
+      // examples: "ADMIN_PROMOTE_USER", "ADMIN_APPROVE_LOAN", "RATE_LIMIT_LOGIN"
     },
 
-    target_type: { type: String, trim: true, index: true }, // "User" | "Loan"
+    target_type: { type: String, trim: true, index: true }, // "User" | "Loan" | "RateLimit"
     target_id: { type: mongoose.Schema.Types.ObjectId, index: true },
 
     // snapshot to help investigations later (safe subset only)

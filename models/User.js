@@ -22,6 +22,14 @@ const UserSchema = new mongoose.Schema({
     trim: true,
     match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email address']
   },
+
+  // Passweord Reset
+  reset_password_token_hash: { type: String },
+  reset_password_expires_at: { type: Date },
+  reset_password_used_at: { type: Date },
+
+  reset_password_token_hash: { type: String, default: null },
+  reset_password_expires_at: { type: Date, default: null },
   
   // Authentication
   password_hash: { 

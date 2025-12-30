@@ -6,6 +6,8 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+const passwordRoutes = require('./routes/password');
+
 // Database
 const connectDB = require('./config/db');
 
@@ -39,7 +41,7 @@ app.use(
     origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-auth-token']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-auth-token'],
   })
 );
 
@@ -49,19 +51,8 @@ app.use(morgan('dev'));
 /* ================================
    RATE LIMITERS
 ================================ */
-// Admin limiter (stricter)
-const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 mins
-  max: 60,                 // 60 requests/15 mins per IP
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    status: 'error',
-    message: 'Too many admin requests. Please try again later.'
-  }
-});
 
-// General API limiter
+// Global API limiter (applies to all routes)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -69,44 +60,91 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     status: 'error',
-    message: 'Too many requests. Please try again later.'
+    message: 'Too many requests. Please try again later.',
   },
-  skip: (req) => req.path.includes('/kyc/documents/upload')
+  skip: (req) => req.path.includes('/kyc/documents/upload'),
 });
 
-// Auth limiter
-const authLimiter = rateLimit({
+// Login limiter: only for login endpoint
+const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
-  skipSuccessfulRequests: true,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: {
     status: 'error',
-    message: 'Too many login attempts. Try again later.'
-  }
+    message: 'Too many login attempts. Please try again later.',
+  },
 });
 
-// KYC limiter
+// Optional: general limiter for other auth endpoints (register, etc.)
+// Keep it higher than loginLimiter? No—apply it but skip /login to avoid double limit.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: 'error',
+    message: 'Too many auth requests. Please try again later.',
+  },
+});
+
+// Admin limiter (stricter)
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: 'error',
+    message: 'Too many admin requests. Please try again later.',
+  },
+});
+
+// KYC limiter (submit endpoint only)
 const kycLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: {
     status: 'error',
-    message: 'Too many KYC submissions. Please wait 1 hour.'
-  }
+    message: 'Too many KYC submissions. Please wait 1 hour.',
+  },
 });
 
+/* ================================
+   APPLY LIMITERS
+================================ */
 app.use(apiLimiter);
-app.use('/api/auth', authLimiter);
+
+// Apply login limiter to ONLY login route
+app.use('/api/auth/login', loginLimiter);
+
+// Apply authLimiter to other /api/auth routes, but skip /login
+app.use('/api/auth', (req, res, next) => {
+  if (req.path === '/login') return next();
+  return authLimiter(req, res, next);
+});
+
+// Apply admin limiter to all admin routes
+app.use('/api/admin', adminLimiter);
+
+// Apply KYC limiter to submit endpoint only
 app.use('/api/kyc/submit', kycLimiter);
 
 /* ================================
    ROUTES
 ================================ */
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', passwordRoutes);
+
 app.use('/api/loan', loanRoutes);
-app.use('/api/admin', adminLimiter);
+
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminKYCRoutes);
+
 app.use('/api/kyc', kycRoutes);
 
 /* ================================
@@ -121,8 +159,8 @@ app.get('/health', (req, res) => {
     features: {
       kyc: true,
       rateLimiting: true,
-      admin: true
-    }
+      admin: true,
+    },
   });
 });
 
@@ -136,7 +174,7 @@ app.get('/api/kyc/requirements/:amount', (req, res) => {
     return res.json({
       required: true,
       level: 'enhanced',
-      message: 'Enhanced KYC required'
+      message: 'Enhanced KYC required',
     });
   }
 
@@ -144,14 +182,14 @@ app.get('/api/kyc/requirements/:amount', (req, res) => {
     return res.json({
       required: true,
       level: 'basic',
-      message: 'Basic KYC required'
+      message: 'Basic KYC required',
     });
   }
 
   res.json({
     required: false,
     level: 'none',
-    message: 'No KYC required'
+    message: 'No KYC required',
   });
 });
 
@@ -165,8 +203,8 @@ app.use('*', (req, res) => {
     suggestedRoutes: [
       { method: 'POST', path: '/api/loan/apply' },
       { method: 'POST', path: '/api/kyc/documents/upload' },
-      { method: 'GET', path: '/api/kyc/status' }
-    ]
+      { method: 'GET', path: '/api/kyc/status' },
+    ],
   });
 });
 
@@ -179,7 +217,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({
     status: 'error',
     message: err.message || 'Internal Server Error',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -193,4 +231,3 @@ app.listen(PORT, () => {
   console.log(`🌐 Health check: http://localhost:${PORT}/health`);
   console.log(`🔐 KYC System: ENABLED`);
 });
-
