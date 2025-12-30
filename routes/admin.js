@@ -11,7 +11,7 @@ const {
   getUserTransactions,
   getReports,
   promoteToAdmin,
-  promoteUser
+  promoteUser,
 } = require('../controllers/adminController');
 
 // Loans
@@ -22,8 +22,7 @@ router.put('/loans/:id/approve', auth, isAdmin, approveLoan);
 router.get('/users', auth, isAdmin, getAllUsers);
 router.put('/users/:userId/promote', auth, isAdmin, promoteToAdmin);
 
-// Promote by email or userId (your existing promoteUser handler expects userId in body)
-// If you want promote-by-email, we can adjust controller later.
+// Promote by email or userId (POST /api/admin/promote)
 router.post('/promote', auth, isAdmin, promoteUser);
 
 // Transactions / Reports
