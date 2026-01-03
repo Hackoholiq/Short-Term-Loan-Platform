@@ -1,71 +1,36 @@
 const express = require('express');
 const router = express.Router();
-const { applyForLoan, getLoansByUser, checkPreApproval } = require('../controllers/loanController'); // Import checkPreApproval
-const auth = require('../middleware/auth');
-const { body, validationResult } = require('express-validator');
 
-/**
- * @swagger
- * /loan/pre-approval:
- *   get:
- *     summary: Check if the user is pre-approved for a loan
- *     description: Checks if the user meets the criteria for loan pre-approval.
- *     tags: [Loans]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Pre-approval status
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 isPreApproved:
- *                   type: boolean
- *                   example: true
- *       500:
- *         description: Server error
- */
+const auth = require('../middleware/auth');
+const { body, param, query, validationResult } = require('express-validator');
+
+const {
+  applyForLoan,
+  getLoansByUser,
+  checkPreApproval,
+  makePayment,
+} = require('../controllers/loanController');
+
+/* =========================
+   VALIDATION MIDDLEWARE
+========================= */
+const validate = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ msg: errors.array()[0].msg });
+  }
+  next();
+};
+
+/* =========================
+   PRE-APPROVAL
+========================= */
 router.get('/pre-approval', auth, checkPreApproval);
 
-/**
- * @swagger
- * /loan/apply:
- *   post:
- *     summary: Apply for a loan
- *     description: Allows a user to apply for a loan.
- *     tags: [Loans]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               loan_amount:
- *                 type: number
- *                 example: 1000
- *               interest_rate:
- *                 type: number
- *                 example: 5
- *               duration:
- *                 type: number
- *                 example: 12
- *               repayment_date:
- *                 type: string
- *                 format: date
- *                 example: '2023-12-31'
- *     responses:
- *       201:
- *         description: Loan application successful
- *       400:
- *         description: Invalid input
- *       500:
- *         description: Server error
- */
+/* =========================
+   APPLY FOR LOAN
+   POST /api/loan/apply
+========================= */
 router.post(
   '/apply',
   auth,
@@ -75,61 +40,43 @@ router.post(
     body('duration').isNumeric().withMessage('Duration must be a number'),
     body('repayment_date').isISO8601().withMessage('Repayment date must be a valid date'),
   ],
+  validate,
   applyForLoan
 );
 
-/**
- * @swagger
- * /loan/my-loans:
- *   get:
- *     summary: Get all loans for the authenticated user
- *     description: Retrieves a list of loans for the logged-in user.
- *     tags: [Loans]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: page
- *         schema:
- *           type: integer
- *           default: 1
- *         description: The page number for pagination
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           default: 10
- *         description: The number of loans per page
- *     responses:
- *       200:
- *         description: List of loans
- *       500:
- *         description: Server error
- */
-router.get('/my-loans', auth, getLoansByUser);
+/* =========================
+   MY LOANS
+   GET /api/loan/my-loans?page=1&limit=10
+========================= */
+router.get(
+  '/my-loans',
+  auth,
+  [
+    query('page').optional().isInt({ min: 1 }).withMessage('page must be >= 1'),
+    query('limit').optional().isInt({ min: 1, max: 50 }).withMessage('limit must be 1-50'),
+  ],
+  validate,
+  getLoansByUser
+);
 
-// KYC check to loan application
-router.post('/apply', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    const loanAmount = req.body.loan_amount;
-    
-    // KYC Check
-    const kycRequirement = await determineKYCRequirement(user, loanAmount);
-    
-    if (kycRequirement.required && user.kyc.status !== 'verified') {
-      return res.status(403).json({
-        error: 'KYC_VERIFICATION_REQUIRED',
-        message: 'Please complete KYC verification before applying for this loan',
-        requiredLevel: kycRequirement.level,
-        redirectTo: '/kyc/verify'
-      });
-    }
-    
-    // ... rest of your loan application logic
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+/* =========================
+   PAY LOAN (MAKE PAYMENT)
+   POST /api/loan/:loanId/pay
+   body: { amount: number }
+========================= */
+router.post(
+  '/:loanId/pay',
+  auth,
+  [
+    param('loanId').isMongoId().withMessage('Invalid loan id'),
+    body('amount').isNumeric().withMessage('amount must be a number'),
+    body('amount').custom((val) => {
+      if (Number(val) <= 0) throw new Error('amount must be greater than 0');
+      return true;
+    }),
+  ],
+  validate,
+  makePayment
+);
 
 module.exports = router;

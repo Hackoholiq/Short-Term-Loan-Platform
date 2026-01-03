@@ -4,6 +4,8 @@ const { body, validationResult } = require('express-validator');
 const logger = require('../config/logger');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
+const Transaction = require('../models/Transaction');
+const Transaction = require('../models/Transaction');
 
 // Nodemailer setup for repayment reminders
 const transporter = nodemailer.createTransport({
@@ -83,6 +85,122 @@ exports.applyForLoan = [
           sendReminder(req.user.email, `Your repayment of $${monthlyPayment.toFixed(2)} is due tomorrow.`);
         });
       }
+
+   /* =========================
+   POST /api/loan/:loanId/pay
+   body: { amount: number }
+========================= */
+exports.makePayment = async (req, res) => {
+  try {
+    const { loanId } = req.params;
+    const amount = Number(req.body?.amount);
+
+    if (!amount || Number.isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ msg: 'amount must be a number greater than 0' });
+    }
+
+    // Ensure loan belongs to user
+    const loan = await Loan.findOne({ _id: loanId, user_id: req.user.id });
+    if (!loan) return res.status(404).json({ msg: 'Loan not found' });
+
+    // Block payment on invalid states
+    const status = String(loan.status || '').toLowerCase();
+    if (['rejected', 'cancelled', 'draft'].includes(status)) {
+      return res.status(400).json({ msg: `Cannot make payment while loan is '${loan.status}'` });
+    }
+    if (status === 'repaid') {
+      return res.status(400).json({ msg: 'Loan is already fully repaid' });
+    }
+
+    if (!Array.isArray(loan.repayments) || loan.repayments.length === 0) {
+      return res.status(400).json({ msg: 'This loan has no repayment schedule' });
+    }
+
+    // Apply payment to earliest unpaid repayments
+    let remaining = amount;
+    let applied = 0;
+
+    for (const r of loan.repayments) {
+      if (remaining <= 0) break;
+
+      const rStatus = String(r.status || '').toLowerCase();
+      if (rStatus === 'paid') continue;
+
+      const dueAmount = Number(r.amount || 0);
+      const alreadyPaid = Number(r.paid_amount || 0);
+
+      const remainingForThisInstallment = Math.max(dueAmount - alreadyPaid, 0);
+      if (remainingForThisInstallment <= 0) {
+        // If it's already fully paid but status wasn't updated
+        r.status = 'paid';
+        r.paid_date = r.paid_date || new Date();
+        continue;
+      }
+
+      const payNow = Math.min(remaining, remainingForThisInstallment);
+
+      r.paid_amount = alreadyPaid + payNow;
+      r.paid_date = new Date();
+
+      if (r.paid_amount >= dueAmount) {
+        r.status = 'paid';
+      } else {
+        r.status = 'partially_paid';
+      }
+
+      remaining -= payNow;
+      applied += payNow;
+    }
+
+    if (applied <= 0) {
+      return res.status(400).json({ msg: 'No repayment items available to pay' });
+    }
+
+    // Update loan totals (your model supports these)
+    loan.total_paid = Number(loan.total_paid || 0) + applied;
+    loan.remaining_balance = Math.max(Number(loan.remaining_balance || 0) - applied, 0);
+    loan.last_payment_date = new Date();
+
+    // Recompute payments_made (count of fully paid installments)
+    loan.payments_made = loan.repayments.filter((x) => String(x.status).toLowerCase() === 'paid').length;
+
+    // Determine next payment date (earliest unpaid due_date)
+    const nextUnpaid = loan.repayments.find((x) => String(x.status).toLowerCase() !== 'paid');
+    loan.next_payment_date = nextUnpaid?.due_date || null;
+
+    // Update loan status
+    const allPaid = loan.repayments.every((x) => String(x.status).toLowerCase() === 'paid');
+    if (allPaid || loan.remaining_balance <= 0) {
+      loan.status = 'repaid';
+    } else if (['approved', 'disbursed', 'pending', 'under_review', 'kyc_pending'].includes(status)) {
+      loan.status = 'active';
+    }
+
+    await loan.save();
+
+    // Create repayment transaction using your schema fields
+    const tx = await Transaction.create({
+      loan_id: loan._id,
+      user_id: req.user.id,
+      amount: applied,
+      transaction_type: 'repayment',
+      status: 'completed',
+      transaction_date: new Date(),
+      created_at: new Date(),
+    });
+
+    return res.status(200).json({
+      msg: 'Payment recorded successfully',
+      appliedAmount: applied,
+      unappliedAmount: Math.max(amount - applied, 0),
+      loan,
+      transaction: tx,
+    });
+  } catch (err) {
+    logger.error(`makePayment error: ${err.message}`);
+    return res.status(500).json({ msg: 'Server error', error: err.message });
+  }
+};
 
       // Create a new loan
       const loan = new Loan({
@@ -205,5 +323,6 @@ exports.checkPreApproval = async (req, res) => {
       msg: 'Server error during pre-approval check', 
       error: err.message 
     });
+    
   }
 };
