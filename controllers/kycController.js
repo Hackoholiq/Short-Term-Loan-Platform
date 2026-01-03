@@ -3,9 +3,6 @@ const User = require('../models/User');
 
 
 // controllers/kycController.js
-const KYC = require('../models/KYC');
-const User = require('../models/User');
-
 exports.startKyc = async (req, res) => {
   try {
     const userId = req.user?.id;
