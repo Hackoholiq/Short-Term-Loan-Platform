@@ -1,39 +1,74 @@
+// controllers/kycController.js
 const KYC = require('../models/KYC');
 const User = require('../models/User');
 
+/* =========================
+   Helpers
+========================= */
+const safeLevel = (level) => {
+  const l = String(level || 'basic').toLowerCase();
+  return ['basic', 'enhanced'].includes(l) ? l : 'basic';
+};
 
-// controllers/kycController.js
+const pickFileUrl = (file) => {
+  // With Cloudinary+multer-storage-cloudinary, file.path is often the hosted URL.
+  return file?.path || file?.secure_url || file?.url || null;
+};
+
+/* =========================
+   GET /api/kyc/requirements/:amount
+========================= */
+exports.getKycRequirements = async (req, res) => {
+  const amount = Number(req.params.amount || 0);
+
+  if (!Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ msg: 'Invalid amount' });
+  }
+
+  if (amount > 5000) {
+    return res.json({ required: true, level: 'enhanced', message: 'Enhanced KYC required' });
+  }
+
+  if (amount > 1000) {
+    return res.json({ required: true, level: 'basic', message: 'Basic KYC required' });
+  }
+
+  return res.json({ required: false, level: 'none', message: 'No KYC required' });
+};
+
+/* =========================
+   POST /api/kyc/start
+   body: { level?: "basic" | "enhanced" }
+========================= */
 exports.startKyc = async (req, res) => {
   try {
     const userId = req.user?.id;
-    const level = String(req.body?.level || 'basic').toLowerCase();
-
-    const safeLevel = ['basic', 'enhanced'].includes(level) ? level : 'basic';
+    const level = safeLevel(req.body?.level);
 
     const kyc = await KYC.findOneAndUpdate(
       { user: userId },
       {
         $set: {
           user: userId,
-          level: safeLevel,
+          level,
           status: 'in_progress',
         },
         $push: {
           history: {
             action: 'START_KYC',
             status: 'in_progress',
-            level: safeLevel,
+            level,
             performed_by: userId,
-            notes: `User started KYC at level ${safeLevel}`,
+            notes: `User started KYC at level ${level}`,
           },
         },
       },
       { upsert: true, new: true }
     );
 
-    // Optional sync to User model (your dashboard sometimes reads user.kyc.*)
+    // Keep User model in sync for dashboard
     await User.findByIdAndUpdate(userId, {
-      $set: { 'kyc.status': 'in_progress', 'kyc.level': safeLevel },
+      $set: { 'kyc.status': 'in_progress', 'kyc.level': level },
     });
 
     return res.json({
@@ -48,37 +83,22 @@ exports.startKyc = async (req, res) => {
   }
 };
 
-// Upload KYC documents
-const KYC = require('../models/KYC');
-const User = require('../models/User');
-
-const pickFileUrl = (file) => {
-  // With Cloudinary+multer-storage-cloudinary, file.path is usually the hosted URL.
-  // Fallback to file.secure_url if your config uses that.
-  return file?.path || file?.secure_url || file?.url || null;
-};
-
+/* =========================
+   POST /api/kyc/documents/upload  (multipart)
+   fields: front, back, selfie
+========================= */
 exports.uploadKycDocuments = async (req, res) => {
   try {
     const userId = req.user?.id;
 
     if (!req.files || Object.keys(req.files).length === 0) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'No files uploaded',
-      });
+      return res.status(400).json({ status: 'error', message: 'No files uploaded' });
     }
 
-    // Your route uses upload.fields([{name:'front'},{name:'back'},{name:'selfie'}])
-    const frontFile = req.files?.front?.[0];
-    const backFile = req.files?.back?.[0];
-    const selfieFile = req.files?.selfie?.[0];
+    const frontUrl = pickFileUrl(req.files?.front?.[0]);
+    const backUrl = pickFileUrl(req.files?.back?.[0]);
+    const selfieUrl = pickFileUrl(req.files?.selfie?.[0]);
 
-    const frontUrl = pickFileUrl(frontFile);
-    const backUrl = pickFileUrl(backFile);
-    const selfieUrl = pickFileUrl(selfieFile);
-
-    // Build list of URLs to store in id_verification.document_images
     const newDocUrls = [frontUrl, backUrl, selfieUrl].filter(Boolean);
 
     if (newDocUrls.length === 0) {
@@ -88,25 +108,11 @@ exports.uploadKycDocuments = async (req, res) => {
       });
     }
 
-    // Upsert a single KYC record per user and append new images
     const kyc = await KYC.findOneAndUpdate(
       { user: userId },
       {
-        $setOnInsert: {
-          user: userId,
-          status: 'in_progress',
-          level: 'basic',
-        },
-
-        // If they haven’t submitted/verified yet, keep them in_progress
-        $set: {
-          status: { $in: ['$status', ['verified', 'pending_review']] } ? '$status' : 'in_progress',
-        },
-
-        $addToSet: {
-          'id_verification.document_images': { $each: newDocUrls },
-        },
-
+        $setOnInsert: { user: userId, status: 'in_progress', level: 'basic' },
+        $addToSet: { 'id_verification.document_images': { $each: newDocUrls } },
         $push: {
           history: {
             action: 'UPLOAD_DOCUMENTS',
@@ -120,220 +126,150 @@ exports.uploadKycDocuments = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    /**
-     * NOTE:
-     * Mongo doesn't allow that "$set: { status: { $in: ... } }" expression in findOneAndUpdate like that
-     * unless using aggregation pipeline updates (Mongo 4.2+).
-     * So we’ll do a safe follow-up instead:
-     */
-    let updated = kyc;
-    if (kyc && !['verified', 'pending_review'].includes(kyc.status)) {
-      updated = await KYC.findByIdAndUpdate(
-        kyc._id,
-        { $set: { status: 'in_progress' } },
-        { new: true }
-      );
-    }
-
-    // Optional: keep User.kyc in sync for dashboard display
     await User.findByIdAndUpdate(userId, {
-      $set: { 'kyc.status': updated.status, 'kyc.level': updated.level },
+      $set: { 'kyc.status': kyc.status, 'kyc.level': kyc.level },
     });
 
     return res.status(201).json({
       status: 'success',
       message: 'KYC documents uploaded successfully',
       data: {
-        status: updated.status,
-        level: updated.level,
-        document_images: updated.id_verification?.document_images || [],
-        submitted_at: updated.submitted_at || null,
-        verified_at: updated.verified_at || null,
+        status: kyc.status,
+        level: kyc.level,
+        document_images: kyc.id_verification?.document_images || [],
+        submitted_at: kyc.submitted_at || null,
+        verified_at: kyc.verified_at || null,
       },
     });
   } catch (error) {
     console.error('🔥 KYC UPLOAD ERROR:', error);
-    return res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
-// Get KYC status for logged-in user
-const getKycStatus = async (req, res) => {
-  try {
-    const kycRecord = await KYC.findOne({ user: req.user.id });
-
-    if (!kycRecord) {
-      return res.json({ status: 'not_started' });
-    }
-
-    return res.json({ status: kycRecord.status });
-  } catch (error) {
-    console.error('KYC status fetch error:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to fetch KYC status' });
+    return res.status(500).json({ status: 'error', message: error.message });
   }
 };
 
 /* =========================
-   GET /api/kyc/requirements/:amount
-========================= */
-exports.getKycRequirements = async (req, res) => {
-  const amount = Number(req.params.amount || 0);
-
-  if (!Number.isFinite(amount) || amount < 0) {
-    return res.status(400).json({ msg: 'Invalid amount' });
-  }
-
-  // Same thresholds you used before
-  if (amount > 5000) {
-    return res.json({
-      required: true,
-      level: 'enhanced',
-      message: 'Enhanced KYC required',
-    });
-  }
-
-  if (amount > 1000) {
-    return res.json({
-      required: true,
-      level: 'basic',
-      message: 'Basic KYC required',
-    });
-  }
-
-  return res.json({
-    required: false,
-    level: 'none',
-    message: 'No KYC required',
-  });
-};
-
-/* =========================
-   POST /api/kyc/start
-   body: { level?: "basic" | "enhanced" }
-========================= */
-exports.startKyc = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    const level = (req.body?.level || 'basic').toLowerCase();
-
-    const kyc = await KYC.findOneAndUpdate(
-      { user: userId },
-      {
-        $set: {
-          user: userId,
-          level,
-          status: 'in_progress',
-          started_at: new Date(),
-        },
-      },
-      { upsert: true, new: true }
-    );
-
-    // Sync to User model too (so dashboard reads it)
-    await User.findByIdAndUpdate(userId, {
-      $set: {
-        'kyc.status': 'in_progress',
-        'kyc.level': level,
-      },
-    });
-
-    return res.json({
-      status: kyc.status,
-      level: kyc.level,
-      started_at: kyc.started_at || null,
-    });
-  } catch (err) {
-    console.error('startKyc error:', err);
-    return res.status(500).json({ msg: 'Server error' });
-  }
-};
-
-/* =========================
-   POST /api/kyc/submit
+   POST /api/kyc/submit  (JSON from Cloudinary widget)
+   Matches your KYCVerify.js payload:
+   {
+     personal_info:{ full_name,date_of_birth,phone_number },
+     address: "...",
+     identity:{ id_type,id_number,id_document:{url,...} },
+     documents:{ proof_of_address:{url,...}, income_proof?, selfie? },
+     verification_context:{ kyc_level_required }
+   }
 ========================= */
 exports.submitKyc = async (req, res) => {
   try {
     const userId = req.user?.id;
 
-    const kyc = await KYC.findOne({ user: userId });
-    if (!kyc) {
-      return res.status(400).json({
-        msg: 'No KYC record found. Please start KYC and upload documents first.',
-      });
+    const { personal_info, address, identity, documents, verification_context } = req.body || {};
+
+    // Light validation
+    if (!personal_info?.full_name || !personal_info?.date_of_birth || !personal_info?.phone_number) {
+      return res.status(400).json({ status: 'error', message: 'Missing personal info' });
+    }
+    if (!address) {
+      return res.status(400).json({ status: 'error', message: 'Missing address' });
+    }
+    if (!identity?.id_number || !identity?.id_type || !identity?.id_document?.url) {
+      return res.status(400).json({ status: 'error', message: 'Missing identity document' });
+    }
+    if (!documents?.proof_of_address?.url) {
+      return res.status(400).json({ status: 'error', message: 'Missing proof of address' });
     }
 
-    if (kyc.status === 'verified') {
-      return res.status(400).json({ msg: 'KYC already verified' });
-    }
+    const level = safeLevel(verification_context?.kyc_level_required);
 
-    // ✅ Document checks based on your schema
-    const idImagesCount = Array.isArray(kyc.id_verification?.document_images)
-      ? kyc.id_verification.document_images.length
-      : 0;
-
-    const hasIdDocs = idImagesCount > 0;
-    const hasProofOfAddress = Boolean(kyc.address_verification?.proof_document);
-
-    // Enhanced KYC may require income proof (optional rule; you can enforce if you want)
-    const requiresIncomeProof = kyc.level === 'enhanced';
-    const hasIncomeProof = Boolean(kyc.financial_info?.income_proof);
-
-    // Minimum requirement for submit: at least ID doc uploaded
-    if (!hasIdDocs) {
-      return res.status(400).json({
-        msg: 'Please upload your ID document images before submitting.',
-      });
-    }
-
-    // If you want to require proof of address for basic/enhanced, enforce here:
-    // (Common flow: basic requires ID + selfie, enhanced requires ID + address + income)
-    // Your schema stores proof_of_address as proof_document.
-    // Enforce it if you want a stricter KYC:
-    if (kyc.level !== 'none' && !hasProofOfAddress) {
-      return res.status(400).json({
-        msg: 'Please upload proof of address before submitting.',
-      });
-    }
-
-    if (requiresIncomeProof && !hasIncomeProof) {
-      return res.status(400).json({
-        msg: 'Enhanced KYC requires proof of income. Please upload income proof before submitting.',
-      });
-    }
-
-    kyc.status = 'pending_review';
-    kyc.submitted_at = new Date();
-
-    kyc.history.push({
-      action: 'SUBMIT_KYC',
+    const update = {
+      user: userId,
       status: 'pending_review',
-      level: kyc.level,
-      performed_by: userId,
-      notes: 'User submitted KYC for review',
-    });
+      level,
+      submitted_at: new Date(),
 
-    await kyc.save();
+      personal_info: {
+        full_name: personal_info.full_name,
+        date_of_birth: personal_info.date_of_birth,
+        // NOTE: your KYC schema doesn't have phone_number in personal_info
+      },
 
-    // Optional sync to User model
+      address_verification: {
+        current_address: { street: address },
+        proof_document: documents.proof_of_address.url,
+      },
+
+      id_verification: {
+        document_type: identity.id_type,
+        document_number: identity.id_number,
+        document_images: [identity.id_document.url],
+      },
+
+      financial_info: documents?.income_proof?.url
+        ? { income_proof: documents.income_proof.url }
+        : undefined,
+
+      biometric_verification: documents?.selfie?.url
+        ? { liveness_check: true }
+        : undefined,
+    };
+
+    const kyc = await KYC.findOneAndUpdate(
+      { user: userId },
+      {
+        $set: update,
+        $push: {
+          history: {
+            action: 'SUBMIT_KYC',
+            status: 'pending_review',
+            level,
+            performed_by: userId,
+            notes: 'User submitted KYC for review (Cloudinary payload)',
+          },
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    // Sync user.kyc for dashboard
     await User.findByIdAndUpdate(userId, {
-      $set: { 'kyc.status': 'pending_review', 'kyc.level': kyc.level },
+      $set: { 'kyc.status': 'pending_review', 'kyc.level': level },
     });
 
-    return res.json({
-      msg: 'KYC submitted for review.',
-      status: kyc.status,
-      level: kyc.level,
-      submitted_at: kyc.submitted_at,
+    return res.status(200).json({
+      status: 'success',
+      message: 'KYC submitted for review',
+      data: {
+        status: kyc.status,
+        level: kyc.level,
+        submitted_at: kyc.submitted_at,
+        verified_at: kyc.verified_at || null,
+      },
     });
   } catch (err) {
     console.error('submitKyc error:', err);
-    return res.status(500).json({ msg: 'Server error' });
+    return res.status(500).json({ status: 'error', message: 'Server error', error: err.message });
   }
 };
 
+/* =========================
+   GET /api/kyc/status
+   Used by Dashboard (apiService.kyc.getStatus)
+========================= */
+exports.getKycStatus = async (req, res) => {
+  try {
+    const kyc = await KYC.findOne({ user: req.user.id }).lean();
 
+    if (!kyc) {
+      return res.json({ status: 'not_started', level: 'none', submitted_at: null, verified_at: null });
+    }
 
-module.exports = { uploadKycDocuments, getKycStatus };
+    return res.json({
+      status: kyc.status || 'not_started',
+      level: kyc.level || 'none',
+      submitted_at: kyc.submitted_at || null,
+      verified_at: kyc.verified_at || null,
+    });
+  } catch (error) {
+    console.error('KYC status fetch error:', error);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch KYC status' });
+  }
+};
