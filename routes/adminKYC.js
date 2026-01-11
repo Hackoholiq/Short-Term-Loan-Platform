@@ -164,6 +164,85 @@ router.get('/kyc/:id', auth, isAdmin, async (req, res) => {
   }
 });
 
+
+const cloudinary = require('../config/cloudinary');
+
+function publicIdFromCloudinaryUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+
+    const uploadIdx = parts.findIndex((p) => p === 'upload');
+    if (uploadIdx === -1) return null;
+
+    const tail = parts.slice(uploadIdx + 1);
+
+    // Skip transformations until version v123...
+    let i = 0;
+    while (i < tail.length && !/^v\d+$/.test(tail[i])) i++;
+    if (i < tail.length && /^v\d+$/.test(tail[i])) i++;
+
+    const publicPath = tail.slice(i).join('/');
+    if (!publicPath) return null;
+
+    return publicPath.replace(/\.[^/.]+$/, ''); // remove extension
+  } catch {
+    return null;
+  }
+}
+
+function makeSigned(public_id, { resource_type = 'image', type = 'authenticated', expiresAtSeconds = 600, transformation } = {}) {
+  const expires_at = Math.floor(Date.now() / 1000) + expiresAtSeconds;
+
+  return cloudinary.url(public_id, {
+    resource_type,
+    type,
+    secure: true,
+    sign_url: true,
+    expires_at,
+    ...(transformation ? { transformation } : {}),
+  });
+}
+
+// ✅ Admin-only: returns signed original + signed page-1 JPG preview (for PDFs)
+router.get('/kyc/signed-url', auth, isAdmin, async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ success: false, error: 'Missing url query param' });
+
+    const public_id = publicIdFromCloudinaryUrl(url);
+    if (!public_id) return res.status(400).json({ success: false, error: 'Could not parse public_id from url' });
+
+    // Your URLs show /image/upload/ so resource_type should be "image" for both jpg & pdf.
+    const resource_type = 'image';
+
+    // Try authenticated first; if it fails in practice, switch order or use private.
+    const typesToTry = ['authenticated', 'private'];
+
+    // We can’t “verify” the URL without making a request here, so we return both candidates.
+    const signedCandidates = typesToTry.map((t) => ({
+      type: t,
+      signedUrl: makeSigned(public_id, { resource_type, type: t, expiresAtSeconds: 600 }),
+      previewUrl: makeSigned(public_id, {
+        resource_type,
+        type: t,
+        expiresAtSeconds: 600,
+        transformation: [{ pg: 1, width: 1000, crop: 'limit', quality: 'auto', fetch_format: 'jpg' }],
+      }),
+    }));
+
+    return res.json({
+      success: true,
+      public_id,
+      resource_type,
+      candidates: signedCandidates,
+    });
+  } catch (e) {
+    console.error('signed-url error:', e);
+    return res.status(500).json({ success: false, error: 'Failed to create signed url' });
+  }
+});
+
 /* =========================
    POST /api/admin/kyc/:id/approve
    body: { level?, notes? }
