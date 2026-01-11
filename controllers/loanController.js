@@ -1,21 +1,29 @@
+// controllers/loanController.js
+
 const Loan = require('../models/Loan');
 const User = require('../models/User');
-const { body, validationResult } = require('express-validator');
-const logger = require('../config/logger');
-const nodemailer = require('nodemailer');
-const cron = require('node-cron');
 const Transaction = require('../models/Transaction');
 
-// Nodemailer setup for repayment reminders
+const { body, validationResult } = require('express-validator');
+const logger = require('../config/logger');
+
+const nodemailer = require('nodemailer');
+const cron = require('node-cron');
+
+// ✅ KYC rules (Option A)
+const { getKycRequirementForAmount, meetsKyc } = require('../utils/kycRules');
+
+/* =========================
+   NODEMAILER SETUP
+========================= */
 const transporter = nodemailer.createTransport({
   service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 
 const sendReminder = (email, message) => {
+  if (!email) return;
+
   const mailOptions = {
     from: process.env.EMAIL_USER,
     to: email,
@@ -24,16 +32,14 @@ const sendReminder = (email, message) => {
   };
 
   transporter.sendMail(mailOptions, (error, info) => {
-    if (error) {
-      logger.error(`Error sending email to ${email}: ${error.message}`);
-    } else {
-      logger.info(`Email sent to ${email}: ${info.response}`);
-    }
+    if (error) logger.error(`Error sending email to ${email}: ${error.message}`);
+    else logger.info(`Email sent to ${email}: ${info.response}`);
   });
 };
 
 /* =========================
    APPLY FOR LOAN
+   POST /api/loan/apply
 ========================= */
 exports.applyForLoan = [
   body('loan_amount').isNumeric().withMessage('Loan amount must be a number'),
@@ -42,6 +48,7 @@ exports.applyForLoan = [
   body('repayment_date').isISO8601().withMessage('Repayment date must be a valid date'),
 
   async (req, res) => {
+    // ✅ express-validator results
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       const errorMessages = errors.array().map((err) => ({
@@ -52,17 +59,71 @@ exports.applyForLoan = [
       return res.status(400).json({ errors: errorMessages });
     }
 
-    const { loan_amount, interest_rate, duration, repayment_date } = req.body;
+    // Normalize numeric inputs
+    const loan_amount = Number(req.body.loan_amount);
+    const interest_rate = Number(req.body.interest_rate);
+    const duration = Number(req.body.duration);
+    const repayment_date = req.body.repayment_date;
 
     try {
       logger.info(`Loan application request by user ${req.user.id}`);
 
-      const monthlyInterestRate = interest_rate / 100 / 12;
-      const monthlyPayment =
-        (loan_amount * monthlyInterestRate) /
-        (1 - Math.pow(1 + monthlyInterestRate, -duration));
+      /* =========================
+         ✅ KYC ENFORCEMENT (Option A)
+      ========================= */
+      const requirement = getKycRequirementForAmount(loan_amount);
 
-      // Generate repayment schedule
+      const user = await User.findById(req.user.id).select('kyc email first_name last_name creditScore');
+      if (!user) return res.status(404).json({ msg: 'User not found' });
+
+      const userKycStatus = user?.kyc?.status || 'not_started';
+      const userKycLevel = String(user?.kyc?.level || 'none').toLowerCase();
+
+      if (requirement.required) {
+        if (userKycStatus !== 'verified') {
+          return res.status(403).json({
+            code: 'KYC_VERIFICATION_REQUIRED',
+            msg: `KYC must be verified (${requirement.level}) before applying for this amount.`,
+            requiredLevel: requirement.level,
+            currentStatus: userKycStatus,
+            currentLevel: userKycLevel,
+            redirectTo: '/kyc/verify',
+          });
+        }
+
+        if (!meetsKyc(requirement.level, userKycLevel)) {
+          return res.status(403).json({
+            code: 'KYC_LEVEL_INSUFFICIENT',
+            msg: `Your KYC level must be ${requirement.level} for this amount.`,
+            requiredLevel: requirement.level,
+            currentStatus: userKycStatus,
+            currentLevel: userKycLevel,
+            redirectTo: '/kyc/verify',
+          });
+        }
+      }
+
+      /* =========================
+         LOAN CALCULATION
+      ========================= */
+      if (!duration || duration <= 0) {
+        return res.status(400).json({ msg: 'Duration must be greater than 0' });
+      }
+      if (!loan_amount || loan_amount <= 0) {
+        return res.status(400).json({ msg: 'Loan amount must be greater than 0' });
+      }
+
+      const monthlyInterestRate = interest_rate / 100 / 12;
+
+      const monthlyPayment =
+        monthlyInterestRate === 0
+          ? loan_amount / duration
+          : (loan_amount * monthlyInterestRate) / (1 - Math.pow(1 + monthlyInterestRate, -duration));
+
+      /* =========================
+         REPAYMENT SCHEDULE + REMINDERS
+         ⚠️ Note: cron schedules are in-memory; they will reset on server restart.
+      ========================= */
       const repayments = [];
       for (let i = 1; i <= duration; i++) {
         const dueDate = new Date(repayment_date);
@@ -74,14 +135,17 @@ exports.applyForLoan = [
           status: 'pending',
         });
 
-        // Schedule reminder 1 day before due date
+        // Reminder 1 day before due date
         const reminderDate = new Date(dueDate);
         reminderDate.setDate(reminderDate.getDate() - 1);
-        const cronExpression = `${reminderDate.getMinutes()} ${reminderDate.getHours()} ${reminderDate.getDate()} ${reminderDate.getMonth() + 1} *`;
+
+        const cronExpression = `${reminderDate.getMinutes()} ${reminderDate.getHours()} ${reminderDate.getDate()} ${
+          reminderDate.getMonth() + 1
+        } *`;
 
         cron.schedule(cronExpression, () => {
           sendReminder(
-            req.user.email,
+            user.email,
             `Your repayment of $${monthlyPayment.toFixed(2)} is due tomorrow.`
           );
         });
@@ -111,17 +175,15 @@ exports.applyForLoan = [
 
 /* =========================
    GET MY LOANS
+   GET /api/loan/my-loans?page=&limit=
 ========================= */
 exports.getLoansByUser = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
     const skip = (page - 1) * limit;
 
-    const loans = await Loan.find({ user_id: req.user.id })
-      .skip(skip)
-      .limit(limit);
-
+    const loans = await Loan.find({ user_id: req.user.id }).skip(skip).limit(limit);
     return res.json(loans);
   } catch (err) {
     logger.error(`Error fetching loans for user ${req.user.id}: ${err.message}`);
@@ -131,9 +193,15 @@ exports.getLoansByUser = async (req, res) => {
 
 /* =========================
    ADMIN: UPDATE LOAN STATUS
+   (Your routes may call this differently; support both body + params)
 ========================= */
 exports.updateLoanStatus = async (req, res) => {
-  const { loan_id, status } = req.body;
+  // Support multiple shapes:
+  // - req.body.loan_id (older)
+  // - req.body.loanId
+  // - req.params.loanId (REST)
+  const loanId = req.body.loan_id || req.body.loanId || req.params.loanId;
+  const status = req.body.status;
 
   const allowedStatuses = ['approved', 'rejected'];
   if (!allowedStatuses.includes(status)) {
@@ -141,31 +209,32 @@ exports.updateLoanStatus = async (req, res) => {
   }
 
   try {
-    logger.info(`Updating loan status for loan ${loan_id} to ${status}`);
+    logger.info(`Updating loan status for loan ${loanId} to ${status}`);
 
-    const loan = await Loan.findById(loan_id);
+    const loan = await Loan.findById(loanId);
     if (!loan) {
-      logger.warn(`Loan not found: ${loan_id}`);
+      logger.warn(`Loan not found: ${loanId}`);
       return res.status(404).json({ msg: 'Loan not found' });
     }
 
     loan.status = status;
     await loan.save();
 
-    logger.info(`Loan status updated successfully for loan ${loan_id}`);
+    logger.info(`Loan status updated successfully for loan ${loanId}`);
     return res.json(loan);
   } catch (err) {
-    logger.error(`Error updating loan status for loan ${loan_id}: ${err.message}`);
+    logger.error(`Error updating loan status for loan ${loanId}: ${err.message}`);
     return res.status(500).json({ msg: 'Server error', error: err.message });
   }
 };
 
 /* =========================
    PRE-APPROVAL
+   GET /api/loan/pre-approval
 ========================= */
 exports.checkPreApproval = async (req, res) => {
   try {
-    console.log('🔍 Checking pre-approval for user ID:', req.user.id);
+    logger.info(`🔍 Checking pre-approval for user ID: ${req.user.id}`);
 
     const user = await User.findById(req.user.id);
     if (!user) {
@@ -199,7 +268,6 @@ exports.checkPreApproval = async (req, res) => {
     });
   } catch (err) {
     logger.error(`Error checking pre-approval: ${err.message}`);
-    console.error('❌ Pre-approval error details:', err);
     return res.status(500).json({
       msg: 'Server error during pre-approval check',
       error: err.message,
@@ -261,7 +329,6 @@ exports.makePayment = async (req, res) => {
 
       r.paid_amount = alreadyPaid + payNow;
       r.paid_date = new Date();
-
       r.status = r.paid_amount >= dueAmount ? 'paid' : 'partially_paid';
 
       remaining -= payNow;
@@ -272,17 +339,23 @@ exports.makePayment = async (req, res) => {
       return res.status(400).json({ msg: 'No repayment items available to pay' });
     }
 
+    // These fields might not exist in your schema; set defensively.
     loan.total_paid = Number(loan.total_paid || 0) + applied;
-    loan.remaining_balance = Math.max(Number(loan.remaining_balance || 0) - applied, 0);
-    loan.last_payment_date = new Date();
 
+    if (loan.remaining_balance != null) {
+      loan.remaining_balance = Math.max(Number(loan.remaining_balance || 0) - applied, 0);
+    }
+
+    loan.last_payment_date = new Date();
     loan.payments_made = loan.repayments.filter((x) => String(x.status).toLowerCase() === 'paid').length;
 
     const nextUnpaid = loan.repayments.find((x) => String(x.status).toLowerCase() !== 'paid');
     loan.next_payment_date = nextUnpaid?.due_date || null;
 
     const allPaid = loan.repayments.every((x) => String(x.status).toLowerCase() === 'paid');
-    if (allPaid || loan.remaining_balance <= 0) {
+    const remainingBalance = loan.remaining_balance == null ? null : Number(loan.remaining_balance || 0);
+
+    if (allPaid || (remainingBalance != null && remainingBalance <= 0)) {
       loan.status = 'repaid';
     } else if (['approved', 'disbursed', 'pending', 'under_review', 'kyc_pending'].includes(status)) {
       loan.status = 'active';

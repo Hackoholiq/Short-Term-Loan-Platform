@@ -149,7 +149,7 @@ exports.uploadKycDocuments = async (req, res) => {
 
 /* =========================
    POST /api/kyc/submit  (JSON from Cloudinary widget)
-   Matches your KYCVerify.js payload:
+   Payload from frontend KYCVerify.js:
    {
      personal_info:{ full_name,date_of_birth,phone_number },
      address: "...",
@@ -161,10 +161,50 @@ exports.uploadKycDocuments = async (req, res) => {
 exports.submitKyc = async (req, res) => {
   try {
     const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
 
     const { personal_info, address, identity, documents, verification_context } = req.body || {};
 
-    // Light validation
+    // ---------- helpers ----------
+    const safeLevel = (lvl) => {
+      const v = String(lvl || '').toLowerCase();
+      if (v === 'enhanced') return 'enhanced';
+      if (v === 'basic') return 'basic';
+      if (v === 'none') return 'none';
+      return 'basic'; // reasonable default when "required"
+    };
+
+    const parseDobToDate = (dobStr) => {
+      // accepts "YYYY-MM-DD" or "DD/MM/YYYY"
+      if (!dobStr) return null;
+      const s = String(dobStr).trim();
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const dt = new Date(`${s}T00:00:00.000Z`);
+        return Number.isNaN(dt.getTime()) ? null : dt;
+      }
+
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+        const [dd, mm, yyyy] = s.split('/');
+        const dt = new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+        return Number.isNaN(dt.getTime()) ? null : dt;
+      }
+
+      const dt = new Date(s);
+      return Number.isNaN(dt.getTime()) ? null : dt;
+    };
+
+    const mapIdType = (t) => {
+      const v = String(t || '').toLowerCase();
+      if (['passport', 'national_id', 'drivers_license', 'voters_card', 'other'].includes(v)) return v;
+      // Frontend uses these:
+      if (v === 'driver_license' || v === 'drivers_licence' || v === 'driver_licence') return 'drivers_license';
+      return 'other';
+    };
+
+    const level = safeLevel(verification_context?.kyc_level_required);
+
+    // ---------- validation ----------
     if (!personal_info?.full_name || !personal_info?.date_of_birth || !personal_info?.phone_number) {
       return res.status(400).json({ status: 'error', message: 'Missing personal info' });
     }
@@ -178,9 +218,21 @@ exports.submitKyc = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Missing proof of address' });
     }
 
-    const level = safeLevel(verification_context?.kyc_level_required);
+    // Enhanced must include selfie (server-side enforcement)
+    if (level === 'enhanced' && !documents?.selfie?.url) {
+      return res.status(400).json({ status: 'error', message: 'Enhanced KYC requires a selfie upload' });
+    }
 
-    const update = {
+    const dobDate = parseDobToDate(personal_info.date_of_birth);
+    if (!dobDate) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid date_of_birth format (use YYYY-MM-DD or DD/MM/YYYY)',
+      });
+    }
+
+    // ---------- build KYC update (MATCHES models/KYC.js) ----------
+    const kycUpdate = {
       user: userId,
       status: 'pending_review',
       level,
@@ -188,34 +240,43 @@ exports.submitKyc = async (req, res) => {
 
       personal_info: {
         full_name: personal_info.full_name,
-        date_of_birth: personal_info.date_of_birth,
-        // NOTE: your KYC schema doesn't have phone_number in personal_info
+        date_of_birth: dobDate, // ✅ Date (matches schema)
       },
 
       address_verification: {
-        current_address: { street: address },
+        current_address: {
+          street: address, // you can later split into city/state/postal_code if needed
+        },
         proof_document: documents.proof_of_address.url,
       },
 
       id_verification: {
-        document_type: identity.id_type,
+        document_type: mapIdType(identity.id_type),
         document_number: identity.id_number,
         document_images: [identity.id_document.url],
+        verified: false,
       },
-
-      financial_info: documents?.income_proof?.url
-        ? { income_proof: documents.income_proof.url }
-        : undefined,
-
-      biometric_verification: documents?.selfie?.url
-        ? { liveness_check: true }
-        : undefined,
     };
 
+    if (documents?.income_proof?.url) {
+      kycUpdate.financial_info = {
+        income_proof: documents.income_proof.url,
+        verified: false,
+      };
+    }
+
+    if (documents?.selfie?.url) {
+      kycUpdate.biometric_verification = {
+        liveness_check: true,
+        verification_date: null,
+      };
+    }
+
+    // ---------- upsert KYC application ----------
     const kyc = await KYC.findOneAndUpdate(
       { user: userId },
       {
-        $set: update,
+        $set: kycUpdate,
         $push: {
           history: {
             action: 'SUBMIT_KYC',
@@ -229,10 +290,29 @@ exports.submitKyc = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Sync user.kyc for dashboard
-    await User.findByIdAndUpdate(userId, {
-      $set: { 'kyc.status': 'pending_review', 'kyc.level': level },
-    });
+    // ---------- sync to User model ----------
+    const userUpdate = {
+      phone: personal_info.phone_number,
+      address: address,
+      date_of_birth: dobDate,
+
+      'kyc.status': 'pending_review',
+      'kyc.level': level,
+
+      'kyc.documents.document_type': mapIdType(identity.id_type),
+      'kyc.documents.document_number': identity.id_number,
+
+      // Store URLs in User.kyc.documents (matches your User.js schema)
+      'kyc.documents.document_front_url': identity.id_document.url,
+      'kyc.documents.proof_of_address_url': documents.proof_of_address.url,
+
+      'kyc.documents.document_verified_at': new Date(),
+    };
+
+    // Optional User doc URLs
+    if (documents?.selfie?.url) userUpdate['kyc.documents.selfie_with_document_url'] = documents.selfie.url;
+
+    await User.findByIdAndUpdate(userId, { $set: userUpdate });
 
     return res.status(200).json({
       status: 'success',

@@ -194,6 +194,36 @@ app.get('/api/kyc/requirements/:amount', (req, res) => {
 });
 
 /* ================================
+   KYC REQUIREMENTS CHECK (query)
+   GET /api/kyc/requirements?amount=5000
+================================ */
+app.get('/api/kyc/requirements', (req, res) => {
+  const amount = parseFloat(req.query.amount) || 0;
+
+  if (amount > 5000) {
+    return res.json({
+      required: true,
+      level: 'enhanced',
+      message: 'Enhanced KYC required',
+    });
+  }
+
+  if (amount > 1000) {
+    return res.json({
+      required: true,
+      level: 'basic',
+      message: 'Basic KYC required',
+    });
+  }
+
+  return res.json({
+    required: false,
+    level: 'none',
+    message: 'No KYC required',
+  });
+});
+
+/* ================================
    404 HANDLER
 ================================ */
 app.use('*', (req, res) => {
