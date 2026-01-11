@@ -7,13 +7,58 @@ const User = require('../models/User');
 ========================= */
 const safeLevel = (level) => {
   const l = String(level || 'basic').toLowerCase();
-  return ['basic', 'enhanced'].includes(l) ? l : 'basic';
+  // KYC model allows: none/basic/enhanced
+  if (l === 'enhanced') return 'enhanced';
+  if (l === 'basic') return 'basic';
+  if (l === 'none') return 'none';
+  return 'basic';
 };
 
 const pickFileUrl = (file) => {
   // With Cloudinary+multer-storage-cloudinary, file.path is often the hosted URL.
   return file?.path || file?.secure_url || file?.url || null;
 };
+
+const parseDobToDate = (dobStr) => {
+  // accepts "YYYY-MM-DD" or "DD/MM/YYYY" (and falls back to Date parse)
+  if (!dobStr) return null;
+  const s = String(dobStr).trim();
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const dt = new Date(`${s}T00:00:00.000Z`);
+    return Number.isNaN(dt.getTime()) ? null : dt;
+  }
+
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+    const [dd, mm, yyyy] = s.split('/');
+    const dt = new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+    return Number.isNaN(dt.getTime()) ? null : dt;
+  }
+
+  const dt = new Date(s);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+};
+
+const mapIdType = (t) => {
+  const v = String(t || '').toLowerCase();
+
+  // KYC model expects:
+  // passport | national_id | drivers_license | voters_card | other
+  if (['passport', 'national_id', 'drivers_license', 'voters_card', 'other'].includes(v)) return v;
+
+  // common frontend variants
+  if (v === 'drivers_licence' || v === 'driver_licence' || v === 'driver_license') return 'drivers_license';
+  if (v === 'nationalid' || v === 'national-id') return 'national_id';
+
+  return 'other';
+};
+
+const normalizeKycResponse = (kyc) => ({
+  status: kyc?.status || 'not_started',
+  level: kyc?.level || 'none',
+  submitted_at: kyc?.submitted_at || null,
+  verified_at: kyc?.verified_at || null,
+});
 
 /* =========================
    GET /api/kyc/requirements/:amount
@@ -43,6 +88,8 @@ exports.getKycRequirements = async (req, res) => {
 exports.startKyc = async (req, res) => {
   try {
     const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
+
     const level = safeLevel(req.body?.level);
 
     const kyc = await KYC.findOneAndUpdate(
@@ -71,12 +118,7 @@ exports.startKyc = async (req, res) => {
       $set: { 'kyc.status': 'in_progress', 'kyc.level': level },
     });
 
-    return res.json({
-      status: kyc.status,
-      level: kyc.level,
-      submitted_at: kyc.submitted_at || null,
-      verified_at: kyc.verified_at || null,
-    });
+    return res.json(normalizeKycResponse(kyc));
   } catch (err) {
     console.error('startKyc error:', err);
     return res.status(500).json({ msg: 'Server error' });
@@ -90,6 +132,7 @@ exports.startKyc = async (req, res) => {
 exports.uploadKycDocuments = async (req, res) => {
   try {
     const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
 
     if (!req.files || Object.keys(req.files).length === 0) {
       return res.status(400).json({ status: 'error', message: 'No files uploaded' });
@@ -108,16 +151,20 @@ exports.uploadKycDocuments = async (req, res) => {
       });
     }
 
+    // NOTE: we do NOT force level/basic here — keep whatever level is already started
+    const existing = await KYC.findOne({ user: userId }).select('level status').lean();
+    const currentLevel = existing?.level || 'basic';
+
     const kyc = await KYC.findOneAndUpdate(
       { user: userId },
       {
-        $setOnInsert: { user: userId, status: 'in_progress', level: 'basic' },
+        $setOnInsert: { user: userId, status: 'in_progress', level: currentLevel },
         $addToSet: { 'id_verification.document_images': { $each: newDocUrls } },
         $push: {
           history: {
             action: 'UPLOAD_DOCUMENTS',
             status: 'in_progress',
-            level: 'basic',
+            level: currentLevel,
             performed_by: userId,
             notes: `Uploaded: ${Object.keys(req.files).join(', ')}`,
           },
@@ -134,11 +181,8 @@ exports.uploadKycDocuments = async (req, res) => {
       status: 'success',
       message: 'KYC documents uploaded successfully',
       data: {
-        status: kyc.status,
-        level: kyc.level,
+        ...normalizeKycResponse(kyc),
         document_images: kyc.id_verification?.document_images || [],
-        submitted_at: kyc.submitted_at || null,
-        verified_at: kyc.verified_at || null,
       },
     });
   } catch (error) {
@@ -149,14 +193,6 @@ exports.uploadKycDocuments = async (req, res) => {
 
 /* =========================
    POST /api/kyc/submit  (JSON from Cloudinary widget)
-   Payload from frontend KYCVerify.js:
-   {
-     personal_info:{ full_name,date_of_birth,phone_number },
-     address: "...",
-     identity:{ id_type,id_number,id_document:{url,...} },
-     documents:{ proof_of_address:{url,...}, income_proof?, selfie? },
-     verification_context:{ kyc_level_required }
-   }
 ========================= */
 exports.submitKyc = async (req, res) => {
   try {
@@ -164,43 +200,6 @@ exports.submitKyc = async (req, res) => {
     if (!userId) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
 
     const { personal_info, address, identity, documents, verification_context } = req.body || {};
-
-    // ---------- helpers ----------
-    const safeLevel = (lvl) => {
-      const v = String(lvl || '').toLowerCase();
-      if (v === 'enhanced') return 'enhanced';
-      if (v === 'basic') return 'basic';
-      if (v === 'none') return 'none';
-      return 'basic'; // reasonable default when "required"
-    };
-
-    const parseDobToDate = (dobStr) => {
-      // accepts "YYYY-MM-DD" or "DD/MM/YYYY"
-      if (!dobStr) return null;
-      const s = String(dobStr).trim();
-
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-        const dt = new Date(`${s}T00:00:00.000Z`);
-        return Number.isNaN(dt.getTime()) ? null : dt;
-      }
-
-      if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
-        const [dd, mm, yyyy] = s.split('/');
-        const dt = new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
-        return Number.isNaN(dt.getTime()) ? null : dt;
-      }
-
-      const dt = new Date(s);
-      return Number.isNaN(dt.getTime()) ? null : dt;
-    };
-
-    const mapIdType = (t) => {
-      const v = String(t || '').toLowerCase();
-      if (['passport', 'national_id', 'drivers_license', 'voters_card', 'other'].includes(v)) return v;
-      // Frontend uses these:
-      if (v === 'driver_license' || v === 'drivers_licence' || v === 'driver_licence') return 'drivers_license';
-      return 'other';
-    };
 
     const level = safeLevel(verification_context?.kyc_level_required);
 
@@ -240,14 +239,15 @@ exports.submitKyc = async (req, res) => {
 
       personal_info: {
         full_name: personal_info.full_name,
-        date_of_birth: dobDate, // ✅ Date (matches schema)
+        date_of_birth: dobDate,
       },
 
       address_verification: {
         current_address: {
-          street: address, // you can later split into city/state/postal_code if needed
+          street: address,
         },
         proof_document: documents.proof_of_address.url,
+        verified: false,
       },
 
       id_verification: {
@@ -290,7 +290,7 @@ exports.submitKyc = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // ---------- sync to User model ----------
+    // ---------- sync key fields to User model ----------
     const userUpdate = {
       phone: personal_info.phone_number,
       address: address,
@@ -302,27 +302,22 @@ exports.submitKyc = async (req, res) => {
       'kyc.documents.document_type': mapIdType(identity.id_type),
       'kyc.documents.document_number': identity.id_number,
 
-      // Store URLs in User.kyc.documents (matches your User.js schema)
       'kyc.documents.document_front_url': identity.id_document.url,
       'kyc.documents.proof_of_address_url': documents.proof_of_address.url,
-
       'kyc.documents.document_verified_at': new Date(),
     };
 
-    // Optional User doc URLs
     if (documents?.selfie?.url) userUpdate['kyc.documents.selfie_with_document_url'] = documents.selfie.url;
+
+    // Optional: back image if you ever add it in UI payload
+    if (identity?.id_document_back?.url) userUpdate['kyc.documents.document_back_url'] = identity.id_document_back.url;
 
     await User.findByIdAndUpdate(userId, { $set: userUpdate });
 
     return res.status(200).json({
       status: 'success',
       message: 'KYC submitted for review',
-      data: {
-        status: kyc.status,
-        level: kyc.level,
-        submitted_at: kyc.submitted_at,
-        verified_at: kyc.verified_at || null,
-      },
+      data: normalizeKycResponse(kyc),
     });
   } catch (err) {
     console.error('submitKyc error:', err);
@@ -332,22 +327,19 @@ exports.submitKyc = async (req, res) => {
 
 /* =========================
    GET /api/kyc/status
-   Used by Dashboard (apiService.kyc.getStatus)
 ========================= */
 exports.getKycStatus = async (req, res) => {
   try {
-    const kyc = await KYC.findOne({ user: req.user.id }).lean();
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
+
+    const kyc = await KYC.findOne({ user: userId }).lean();
 
     if (!kyc) {
       return res.json({ status: 'not_started', level: 'none', submitted_at: null, verified_at: null });
     }
 
-    return res.json({
-      status: kyc.status || 'not_started',
-      level: kyc.level || 'none',
-      submitted_at: kyc.submitted_at || null,
-      verified_at: kyc.verified_at || null,
-    });
+    return res.json(normalizeKycResponse(kyc));
   } catch (error) {
     console.error('KYC status fetch error:', error);
     return res.status(500).json({ status: 'error', message: 'Failed to fetch KYC status' });
